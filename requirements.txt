@@ -1,0 +1,9 @@
+# rtde-2.7.2-release.zip
+opencv-python
+numpy==1.23.5
+matplotlib
+roboticstoolbox-python
+pandas
+ur-rtde
+pymodbus==3.4.1
+pyserial==3.5
