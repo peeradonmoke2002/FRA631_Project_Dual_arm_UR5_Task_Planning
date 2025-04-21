@@ -59,35 +59,17 @@ class UR5eDH(DHRobot):
         )
 
         # Named configurations
-        self.qr = np.radians([180, 0, 0, 0, 90, 0])
-        self.qz = np.zeros(6)
+        # self.qr = np.radians([180, 0, 0, 0, 90, 0])
+        # self.qz = np.zeros(6)
         # Default joint configuration (q)
         self.q = np.zeros(6)
-        self.q_HOME = [0.7267194390296936, -1.942333837548727, -2.0496392250061035, -2.273778577844137, -0.8829587141620081, 2.369927406311035]
-        self.addconfiguration("qr", self.qr)
-        self.addconfiguration("qz", self.qz)
+        self.q_HOME =[0.701172053107018, 0.184272460738082, 0.1721568294843568,
+                       -1.7318488600590023, 0.686830145115122, -1.731258978679887]
+        # self.addconfiguration("qr", self.qr)
+        # self.addconfiguration("qz", self.qz)
         self.addconfiguration("q_HOME", self.q_HOME)
 
 
-    def set_q(self, q):
-        """
-        Set the robot's joint configuration.
-        """
-        q = np.array(q)
-        if q.shape != (6,):
-            raise ValueError("Joint configuration must be a 6-element vector.")
-        self.q = q
-
-
 if __name__ == "__main__":
-    ur5e = UR5eDH()
-
-    print("Initial config (q):", ur5e.q)
-
-    # Set a new configuration
-    ur5e.set_q([0, -np.pi/2, np.pi/2, 0, np.pi/2, 0])
-    print("Updated config (q):", ur5e.q)
-
-    # Forward kinematics at new q
-    T = ur5e.fkine(ur5e.q)
-    print("End-effector pose:\n", T)
+    ur5e = UR5eDH(symbolic=False)
+    print(ur5e)

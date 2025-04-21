@@ -5,7 +5,12 @@ import time
 import math
 from typing import Optional, List
 import numpy as np
+from roboticstoolbox import DHRobot, RevoluteDH
+from spatialmath import SE3
+from spatialmath.base import trotx, troty, trotz
+from spatialmath import SO3
 from math import pi, cos, sin
+from .planning import Planning
 
 class RobotControl:
     def __init__(self):
@@ -50,19 +55,40 @@ class RobotControl:
         """Return the current TCP offset."""
         return self._ROBOT_CON_.getTCPOffset()
     
-    def robot_get_fk(self, q: Optional[List[float]] = None, tcp_offset: Optional[List[float]] = None):
-         if q is None and tcp_offset is None:
-             return self._ROBOT_RECV_.getForwardKinematics()
-         else:
-            return self._ROBOT_RECV_.getForwardKinematics(q, tcp_offset)
+    def robot_get_fk(self):
+        return self._ROBOT_CON_.getForwardKinematics()
+    
+    def robot_get_test_fk(self, joint_pos, TCP_offset):
+        """
+        Calculate forward kinematics for the robot.
+        
+        Parameters:
+            joint_pos: Joint positions as a list of floats [q1, q2, q3, q4, q5, q6].
+            TCP_offset: TCP offset as a list of floats [x, y, z, Rx, Ry, Rz].
+        
+        Returns:
+            The pose computed from FK.
+        """
+        pose = self._ROBOT_CON_.getForwardKinematics(joint_pos,TCP_offset)
+        return pose
 
-
-    def robot_get_ik(self, 
-                     x: List[float], 
-                     qnear: Optional[List[float]] = None, 
-                     maxPositionError: Optional[float] = None, 
-                     maxOrientationError: Optional[float] = None):
-        return self._ROBOT_CON_.getInverseKinematics(x)
+    def robot_get_ik(self, x: List[float]):
+        """
+        Calculate inverse kinematics for the robot.
+        
+        Parameters:
+            x: Target pose as a list of floats [x, y, z, Rx, Ry, Rz].
+        
+        Returns:
+            The joint configuration computed from IK or raises an error if IK fails.
+        """
+        q_robot = self.robot_get_joint_rad()  # Current joint configuration as seed
+        joint_robot = self._ROBOT_CON_.getInverseKinematics(x, q_robot)
+        
+        if joint_robot is None:
+            raise ValueError("Inverse kinematics failed to find a solution for the given pose.")
+        
+        return joint_robot
 
         
     # --------------------------
@@ -86,9 +112,9 @@ class RobotControl:
         """Stop joint movement."""
         self._ROBOT_CON_.stopJ(a, asynchronous)
 
-    def robot_move_speed(self, velocity) -> None:
+    def robot_move_speed(self, velocity, acceleration, time) -> None:
         """Move robot with a linear speed."""
-        self._ROBOT_CON_.speedL(xd=velocity, acceleration=0.1, time=0)
+        self._ROBOT_CON_.speedL(xd=velocity, acceleration=acceleration, time=time)
 
     def robot_move_speed_stop(self, acceleration=0.1) -> None:
         """Stop linear speed movement."""
@@ -109,6 +135,131 @@ class RobotControl:
         """Move robot linearly to the given pose."""
         self._ROBOT_CON_.moveL(pose, speed, acceleration, asynchronous=asynchronous)
 
+    def my_robot_moveL(self,
+                        robotDH,
+                        pose: list,
+                        dt: float   ,
+                        speed: float     ,
+                        acceleration: float ,
+                        visualize: bool = False
+                        ) -> None:
+            """
+            Move the robot linearly to the given pose using a Cartesian cubic
+            trajectory and resolved-rate IK with speedJ.
+            """
+            # 1) CURRENT & TARGET SE3
+            pos_current = self.robot_get_position()
+            T_current = SE3(pos_current[0], pos_current[1], pos_current[2]) @ SE3.RPY(pos_current[3], pos_current[4], pos_current[5], unit='rad')
+
+            T_goal =  SE3(pose[0], pose[1], pose[2]) @ SE3.RPY(pose[3], pose[4], pose[5], unit='rad')
+
+            # 2) COMPUTE CARTESIAN TRAJECTORY
+            planning = Planning(dt)
+            pos_start = T_current.t  # This is a (3,) numpy array [x, y, z]
+            pos_end   = T_goal.t  # This is a (3,) numpy array [x, y, z]
+            dist = np.linalg.norm(pos_end - pos_start)
+            T_total, profile = planning.compute_traj_time(dist, speed, acceleration)
+
+            # time vector
+            num_steps = int(np.ceil(T_total / dt)) + 1  # Use np.ceil for consistency
+            t_vec = np.linspace(0, T_total, num_steps)
+
+            # preallocate
+            pos_traj = np.zeros((len(t_vec), 3))
+            speed_traj = np.zeros((len(t_vec), 3))  # Initialize speed trajectory array
+            acc_traj = np.zeros((len(t_vec), 3))  # Initialize acceleration trajectory array
+
+            v0, v1 = 0.0, 0.0
+            # per-axis cubic
+
+            for axis in range(3):
+                t_arr, p_arr, v_arr, a_arr = planning.cubic_trajectory(
+                    pos_start[axis], pos_end[axis], v0, v1, T_total
+                )
+                pos_traj[:, axis] = p_arr.flatten()
+                speed_traj[:, axis] = v_arr.flatten()
+                acc_traj[:, axis] = a_arr.flatten()
+
+            traj_T = []
+            for j, t in enumerate(t_vec):
+                s = t / T_total  # normalized time [0, 1]
+                T_interp = T_current.interp(T_goal, s)  # Interpolate orientation
+                # Replace the translation with the cubic trajectory value for consistency:
+                T_interp = SE3.Rt(T_interp.R[:3, :3], pos_traj[j, :])
+                traj_T.append(T_interp)
+            # build SE3 waypoints (orientation by interp, position from pos_traj)
+            SE3_waypoints = []
+            for T in traj_T:
+                SE3_waypoints.append(T)
+
+            # 3) INVERSE KINEMATICS FOR ALL WAYPOINTS
+            # Note: if use this it will take too mcuh time to run so skip it!
+            # joint_traj = []
+            # for idx, T_pose in enumerate(traj_T):
+            #     pos = T_pose.t.tolist()
+            #     orientation = T_pose.rpy()
+            #     tcp_pose_list = pos + list(orientation)
+            #     q_joint = self.robot_get_ik(tcp_pose_list)
+            #     if q_joint is None:
+            #         print(f"IK failed for waypoint {idx}.")
+            #         break  # or handle the error as needed
+            #     joint_traj.append(q_joint)
+            # if len(joint_traj) != len(traj_T):
+            #     raise RuntimeError("Incomplete joint trajectory. Please check IK solutions for all waypoints.")
+
+            print("Successfully computed joint trajectory for all waypoints.")
+            # 4) EXECUTE WITH RESOLVED-RATE IK (speedJ)
+            joint_vels = []   # for visualization
+            timestamps = []
+            start_time = time.time()
+            joint_traj = []
+
+            for i in range(num_steps):
+                current_time = time.time() - start_time
+                timestamps.append(current_time)
+                # desired TCP velocity twist = [vx,vy,vz, 0,0,0]
+                x_dot_des = speed_traj[i, :]  # Desired linear speed
+                ang_vel = np.zeros(3)  # Initialize angular velocity
+                x_dot_des = np.concatenate((x_dot_des, ang_vel))  # Shape: (6,)
+                x_dot_des = np.array(x_dot_des, dtype=float)  # Ensure it's a numpy array
+                # q_current  = joint_traj[i]  # Current joint configuration
+                q_current = self.robot_get_joint_rad()  # Current joint configuration
+                joint_traj.append(q_current)
+                # compute analytic Jacobian
+                J = robotDH.jacob0(q_current)  # J should be a 6x6 matrix.
+                dq = np.linalg.inv(J) @ x_dot_des
+                # check sigularity of Jacobian matrix
+                if np.linalg.cond(J) < 1e-09:
+                    print("Jacobian is singular, cannot compute joint velocities.")
+                    break
+                # record for visualization
+                joint_vels.append(dq)
+
+
+                # send the speedJ command
+                self.robot_speed_J(dq.tolist(), acceleration=acceleration, time=dt)
+
+                # wait for the next step
+                time.sleep(dt)
+
+
+            # if user asked for visualization data, return it
+            if visualize:
+                return SE3_waypoints, np.array(joint_traj), np.array(joint_vels), timestamps
+
+
+
+            # otherwise, we’re done
+            time.sleep(0.5)  # wait for last command to finish
+            self.robot_move_speed_stop()
+            print(">> my_robot_moveL: trajectory executed successfully")
+            return True
+
+
+
+
+
+
     def robot_moveL_stop(self, a=10.0, asynchronous=False) -> None:
         """Stop linear movement."""
         self._ROBOT_CON_.stopL(a, asynchronous)
@@ -124,6 +275,14 @@ class RobotControl:
         else:
             self._ROBOT_CON_.speedJ(velocity, acceleration)
 
+    def robo_move_home(self):
+        HOME_POS = [0.701172053107018, 0.184272460738082, 0.1721568294843568,
+                    -1.7318488600590023, 0.686830145115122, -1.731258978679887]
+        SPEED = 0.05
+        print("Moving to home position...")
+        self.robot_moveL(HOME_POS, SPEED)
+        print("Arrived at home position.")
+        time.sleep(1)
 
 
     def my_convert_position_from_left_to_avatar(self,position: list[float]) -> list[float]:
@@ -170,8 +329,7 @@ class RobotControl:
         res[1] += 0.18
 
         return res
-
-            
+       
     def my_transform_position_to_world_ref(self, position: list[float]) -> list[float]:
         """
         Convert position from local robot reference to world (avatar) reference.

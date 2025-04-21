@@ -5,15 +5,19 @@ import math
 from .point3d import Point3D
 import json
 import pathlib
-import sys
 from scipy.spatial.transform import Rotation as R
 import math 
+import time
+import os
 
-config_path = pathlib.Path(__file__).parent.parent / "FRA631_Project_Dual_arm_UR5_Calibration/caribration/config/cam.json"
-print("Loading camera configuration from:", config_path)
-jsonObj = json.load(open(config_path))
-json_string = str(jsonObj).replace("'", '\"')
 
+# global variables
+CONFIG_PATH = pathlib.Path(__file__).resolve().parents[3] / "FRA631_Project_Dual_arm_UR5_Calibration/caribration/config/cam.json"
+print("Loading camera configuration from:", CONFIG_PATH)
+jsonObj = json.load(open(CONFIG_PATH))
+CAM_CONFIG_JSON = str(jsonObj).replace("'", '\"')
+CONFIG_MATRIX_PATH = pathlib.Path(__file__).resolve().parents[3] / "FRA631_Project_Dual_arm_UR5_Calibration/caribration/config/best_matrix.json"
+print("Loading camera matrix from:", CONFIG_MATRIX_PATH)
 
 
 class RealsenseCam:
@@ -28,7 +32,9 @@ class RealsenseCam:
         self.align_depth = None 
         self.imu_pipe = None
         self.imu_config = None
+        self.best_matrix = None
         self.init_cam()
+        self.load_matrix()
         print("RealsenseCam initialized with width: {}, height: {}, fps: {}".format(width, height, fps))
   
     def init_cam(self):
@@ -72,7 +78,7 @@ class RealsenseCam:
                 advnc_mode.toggle_advanced_mode(True)
 
             # Load settings from config JSON.
-            advnc_mode.load_json(json_string)
+            advnc_mode.load_json(CAM_CONFIG_JSON)
 
             print(f"RealSense camera started with aligned color and depth streams "
                 f"({self.width}x{self.height}@{self.fps}fps)")
@@ -260,6 +266,136 @@ class RealsenseCam:
         else:
             print("No markers detected.")
             return output_image, Point3D(0, 0, 0)
+        
+    def stop(self):
+            """
+            Stop the RealSense pipeline.
+            """
+            if self.pipeline is None and self.imu_pipe is None:
+                print("Pipeline is not initialized.")
+                return
+            if self.pipeline and self.imu_pipe:
+                print("Stopping RealSense camera...")
+                self.pipeline.stop()
+                self.imu_pipe.stop()
+                self.imu_pipe = None
+                self.pipeline = None
+                self.config = None
+                self.profile = None
+                self.align = None
+                self.align_depth = None 
+                print("RealSense camera stopped.")
+            else:
+                print("Pipeline is already stopped or not initialized.")
+ 
+
+    def cam_capture_marker(self, aruco_dict_type):
+        """
+        Launches the RealSense camera to obtain the board pose.
+        Returns the board pose (camera coordinate system) as a Point3D instance.
+        """
+        # cv2.aruco.DICT_5X5_1000
+        aruco_dict = cv2.aruco.getPredefinedDictionary(aruco_dict_type)
+        image_marked, point3d = self.get_all_board_pose(aruco_dict)
+        # print("Camera measurement:", point3d)
+        if image_marked is not None:
+            cv2.imshow("Detected Board", image_marked)
+            cv2.waitKey(5000)
+            cv2.destroyAllWindows()
+            self.save_image(image_marked)
+        
+        return point3d
+    
+    def save_image(self, image):
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        save_path = pathlib.Path(__file__).parent.parent / f"images/detected_board_{timestamp}.png"
+        cv2.imwrite(save_path, image)
+        print(f"Marked image saved to {save_path}")
+
+    
+    def cam_capture_marker_jupyter(self, aruco_dict_type):
+        """
+        Launches the RealSense camera to obtain the board pose.
+        Returns the board pose (camera coordinate system) as a Point3D instance.
+        """
+
+        # cv2.aruco.DICT_5X5_1000
+        aruco_dict = cv2.aruco.getPredefinedDictionary(aruco_dict_type)
+        image_marked, point3d = self.get_all_board_pose(aruco_dict)
+        # print("Camera measurement:", point3d)
+        if image_marked is not None:
+            plt.figure(figsize=(10, 6))
+            plt.imshow(cv2.cvtColor(image_marked, cv2.COLOR_BGR2RGB))
+            plt.axis('off')
+            plt.show()
+        return point3d
+    
+    def load_matrix(self):
+        """
+        Loads the transformation matrix from a file.
+        Returns the transformation matrix.
+        """
+        try:
+            with open(CONFIG_MATRIX_PATH, 'r') as f:
+                loaded_data = json.load(f)
+                name = loaded_data["name"]
+                print("Loaded matrix name:", name)
+                # Convert the list to a numpy array.
+                self.best_matrix = np.array(loaded_data["matrix"])
+
+        except FileNotFoundError:
+            print("Transformation matrix file not found.")
+            return None
+
+    def transform_marker_points(self, marker_points):
+        """
+        Applies a 4x4 transformation matrix to a list of marker points.
+        
+        Parameters:
+        - marker_points: A list of dictionaries, each in the format:
+                {"id": <marker_id>, "point": Point3D(x, y, z)}
+        - transformation_matrix: A 4x4 numpy array representing the transformation.
+        
+        Returns:
+        - transformed_points: A list of dictionaries, each with the marker id and
+            its transformed point as a Point3D.
+        """
+        if self.best_matrix is None:
+            print("No transformation matrix loaded.")
+            return None
+        
+        transformed_points = []
+        for marker in marker_points:
+            marker_id = marker["id"]
+            pt = marker["point"]
+            # Create the homogeneous coordinate (4,1) by appending a 1.
+            homo_pt = np.array([pt.x, pt.y, pt.z, 1], dtype=np.float32).reshape(4, 1)
+            # Multiply by the transformation matrix.
+            transformed_homo = self.best_matrix @ homo_pt
+            # Convert back to Cartesian coordinates (assuming transformation_matrix is affine).
+            transformed_pt = transformed_homo[:3, 0] / transformed_homo[3, 0]  # in case scale != 1
+            # Create a new Point3D object for the transformed point.
+            transformed_point = Point3D(transformed_pt[0], transformed_pt[1], transformed_pt[2])
+            transformed_points.append({"id": marker_id, "point": transformed_point})
+        return transformed_points
+
+    def restart(self):
+        """
+        Restart the RealSense pipeline.
+        """
+        if self.pipeline is None:
+            print("Pipeline is not initialized. Cannot restart.")
+            return
+        print("Restarting RealSense camera...")
+        # Stop the pipeline before reinitializing
+        self.stop()
+        self.init_cam()
+        print("RealSense camera restarted with aligned color and depth streams.")
+
+    def __del__(self):
+        self.stop()
+
+    # ----- Not use function -----
 
     def get_board_pose_estimate(self, aruco_dict, camera_matrix, dist_coeffs, marker_length=0.05):
         """
@@ -349,92 +485,6 @@ class RealsenseCam:
             print("No markers detected.")
             return output_image, None, Point3D(0, 0, 0)
 
-
-
-
-    # def get_board_pose_estimate(self, aruco_dict, camera_matrix, dist_coeffs, marker_length=0.05):
-    #     """
-    #     Estimates the 6DoF pose of the detected Aruco marker board using estimatePoseSingleMarkers.
-        
-    #     Parameters:
-    #     - aruco_dict: The dictionary used for marker detection 
-    #         (e.g., cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_50)).
-    #     - camera_matrix: The camera intrinsic matrix (3x3 numpy array).
-    #     - dist_coeffs: Distortion coefficients (numpy array, e.g., np.zeros((5,1), dtype=np.float32)).
-    #     - marker_length: The actual side length of the marker in meters (default is 0.05).
-        
-    #     Returns:
-    #     - output_image: The color image with detected markers and the coordinate axes drawn.
-    #     - rvec: The rotation vector for the first detected marker (if available) or None.
-    #     - tvec: The translation (as a Point3D) for the first detected marker (if available) or a Point3D at (0,0,0).
-    #     """
-    #     # Capture color and depth frames.
-    #     color_image, depth_frame, _ = self.get_color_and_depth_frames()
-    #     if color_image is None or depth_frame is None:
-    #         print("Failed to capture color/depth.")
-    #         return None, None, Point3D(0, 0, 0)
-        
-    #     gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
-        
-    #     # Create an Aruco detector and detect markers.
-    #     parameters = cv2.aruco.DetectorParameters()
-    #     detector = cv2.aruco.ArucoDetector(aruco_dict, parameters)
-    #     corners, ids, rejected = detector.detectMarkers(gray)
-    #     output_image = color_image.copy()
-        
-    #     if ids is not None and len(ids) > 0:
-    #         # Draw detected markers for visualization.
-    #         cv2.aruco.drawDetectedMarkers(output_image, corners, ids)
-            
-    #         # Use estimatePoseSingleMarkers to obtain rvecs and tvecs for each marker.
-    #         rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
-    #             corners,
-    #             markerLength=marker_length,
-    #             cameraMatrix=camera_matrix,
-    #             distCoeffs=dist_coeffs
-    #         )
-            
-    #         # Check if pose estimation returned any data.
-    #         if rvecs is not None and len(rvecs) > 0:
-    #             # For each detected marker, draw coordinate axes on the image.
-    #             for marker_index in range(len(rvecs)):
-    #                 cv2.drawFrameAxes(output_image, camera_matrix, dist_coeffs, 
-    #                                 rvecs[marker_index], tvecs[marker_index], marker_length)
-                
-    #             # Use the first marker's pose as an example.
-    #             # tvecs is of shape (num_markers, 1, 3); extract the first one.
-    #             tvec = tvecs[0]
-    #             rvec = rvecs[0]
-    #             # Convert the translation to a Point3D.
-    #             point3d = Point3D(tvec[0][0], tvec[0][1], tvec[0][2])
-                
-    #             # Convert the rotation vector to a rotation matrix.
-    #             rot_matrix, _ = cv2.Rodrigues(rvec)
-    #             # If you want to work with quaternions and Euler angles, you can do so. For example,
-    #             # using the scipy.spatial.transform.Rotation package:
-    #             #
-    #             # from scipy.spatial.transform import Rotation as R
-    #             r = R.from_matrix(rot_matrix)
-    #             quat = r.as_quat()   # returns in (x, y, z, w) format
-    #             roll, pitch, yaw = self.euler_from_quaternion(quat[0], quat[1], quat[2], quat[3])
-    #             print("Roll (deg):", math.degrees(roll))
-    #             print("Pitch (deg):", math.degrees(pitch))
-    #             print("Yaw (deg):", math.degrees(yaw))
-    #             #
-    #             # For now, we simply print the raw rotation vector.
-    #             print("Estimated translation (tvec):", point3d)
-    #             print("Estimated rotation vector (rvec):", rvec.ravel())
-                
-    #             return output_image, rvec, point3d
-    #         else:
-    #             print("estimatePoseSingleMarkers returned no pose data.")
-    #             return output_image, None, Point3D(0, 0, 0)
-    #     else:
-    #         print("No markers detected.")
-    #         return output_image, None, Point3D(0, 0, 0)
-
-
-
     def euler_from_quaternion(self,x, y, z, w):
         """
         Convert a quaternion into euler angles (roll, pitch, yaw)
@@ -457,7 +507,6 @@ class RealsenseCam:
             
         return roll_x, pitch_y, yaw_z # in radians
     
-
     def get_imu_frames(self):
         """
         Retrieves accelerometer and gyroscope data.
@@ -476,44 +525,7 @@ class RealsenseCam:
             print("Failed to retrieve IMU data.")
             return None, None
 
-
-    def stop(self):
-        """
-        Stop the RealSense pipeline.
-        """
-        if self.pipeline is None and self.imu_pipe is None:
-            print("Pipeline is not initialized.")
-            return
-        if self.pipeline and self.imu_pipe:
-            print("Stopping RealSense camera...")
-            self.pipeline.stop()
-            self.imu_pipe.stop()
-            self.imu_pipe = None
-            self.pipeline = None
-            self.config = None
-            self.profile = None
-            self.align = None
-            self.align_depth = None 
-            print("RealSense camera stopped.")
-        else:
-            print("Pipeline is already stopped or not initialized.")
- 
-
-    def restart(self):
-        """
-        Restart the RealSense pipeline.
-        """
-        if self.pipeline is None:
-            print("Pipeline is not initialized. Cannot restart.")
-            return
-        print("Restarting RealSense camera...")
-        # Stop the pipeline before reinitializing
-        self.stop()
-        self.init_cam()
-        print("RealSense camera restarted with aligned color and depth streams.")
-
-    def __del__(self):
-        self.stop()
+   
 
 
 
