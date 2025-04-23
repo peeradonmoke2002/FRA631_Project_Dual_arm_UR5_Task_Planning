@@ -54,8 +54,8 @@ class Move2Object:
         self.init_gripper()
         # Track which empty markers have been used (markers with IDs 100, 101, 102).
         self.used_empty_markers = []
-        self.group_left = set(range(100, 104))
-        self.group_right = set(range(105, 108))
+        self.group_left = set(range(100, 103))
+        self.group_right = set(range(104, 107))
         
 
     def init_gripper(self):
@@ -182,7 +182,7 @@ class Move2Object:
  
         p = marker["point"]
         approach = [p.x , p.y - 0.20, p.z] + RPY
-        pick_pos = [p.x , p.y-0.01 ,p.z] + GRAP_RPY
+        pick_pos = [p.x , p.y ,p.z] + GRAP_RPY
 
         print(f"[PICK] Marker ID {marker['id']} at (x={p.x}, y={p.y}, z={p.z})")
         # move above in X–Z
@@ -206,7 +206,7 @@ class Move2Object:
         # approach pose (X–Z move, Y fixed)
         approach = [p.x, p.y - 0.20, p.z] + RPY
         # actual place pose
-        place_pos = [p.x, p.y-0.08,p.z] + GRAP_RPY
+        place_pos = [p.x, p.y-0.065,p.z] + GRAP_RPY
         print(f"[PLACE] at marker pos (x={p.x}, y={p.y}, z={p.z})")
         # move above in X–Z
         print("move linear")
@@ -281,7 +281,7 @@ class Move2Object:
 
     def detect_overlaps(self, pts):
 
-        STACK_Y_THRESHOLD = 0.34
+        STACK_Y_THRESHOLD = 0.3
 
         # 1) Filter down to just the real boxes
         real_boxes = [m for m in pts if m["id"] < 100]
@@ -293,9 +293,7 @@ class Move2Object:
         return [stacked] if stacked else []
     
     def destack_within_zone(self, group_ids):
-        """
-        Destack only within the specified group of marker IDs (e.g., left or right).
-        """
+
         while True:
             raw_pts = self.cam_relasense()
             transformed = self.transform_marker_points(raw_pts)
@@ -324,7 +322,16 @@ class Move2Object:
             self.used_empty_markers.append(spot["id"])
             print(f"[DESTACK] Moving box {lowest['id']} → marker {spot['id']}")
             self.pick_box(lowest)
-            self.place_box(spot["point"])
+            self.move_home_rpy()
+            # refresh spot pose from camera before placing
+            raw2 = self.cam_relasense()
+            xf2 = self.transform_marker_points(raw2)
+            updated = next((m for m in xf2 if m["id"] == spot["id"]), None)
+            if updated:
+                self.place_box(updated["point"])
+            else:
+                print(f"[DESTACK] Warning: marker {spot['id']} lost, placing at last known point")
+                self.place_box(spot["point"])
             self.move_home()
             time.sleep(1)
         
@@ -334,11 +341,20 @@ def main():
     mover.move_home()
     time.sleep(2)
     while True:
+        # At the start of each loop, check for overlaps
+        raw_pts = mover.cam_relasense()
+        transformed = mover.transform_marker_points(raw_pts)
+        overlaps = mover.detect_overlaps(transformed)
+        if not overlaps:
+            # No stacks detected: skip destacking menu and go to arrange phase
+            print("[INFO] No stacked boxes detected. Proceeding to Arrange phase.")
+            # Jump to Phase 2: Arrange remaining boxes
+            break
         # ----- Phase 1: Destack only within the left or right zone -----
         print("Choose an operation:")
-        print("  1) move all box on LEFT zone (100–104)")
-        print("  2) move all box on RIGHT zone (104–108)")
-        print("  3) Custom stacking")
+        print("  1) Unstack on LEFT zone (100–103)")
+        print("  2) Unstack on RIGHT zone (104–107)")
+        print("  3) Custom")
 
         op_choice = input("Enter 1/2/3: ").strip()
 
@@ -357,24 +373,18 @@ def main():
         elif op_choice != "3":
             print("Invalid choice. Exiting.")
             break
-        elif op_choice == "3":
-            # ----- Phase 2: Arrange remaining boxes: CLI menu -----
-            raw_pts     = mover.cam_relasense()
-            transformed = mover.transform_marker_points(raw_pts)
-            box_ids   = sorted(m["id"] for m in transformed if m["id"] < 100)
-            empty_ids = sorted(m["id"] for m in transformed if m["id"] >= 100)
+    # ----- Phase 2: Arrange remaining boxes: CLI menu -----
+    raw_pts     = mover.cam_relasense()
+    transformed = mover.transform_marker_points(raw_pts)
+    box_ids     = sorted(m["id"] for m in transformed if m["id"] < 100)
+    empty_ids   = sorted(m["id"] for m in transformed if m["id"] >= 100)
 
-            # Check if blocks are currently stacked
-            overlaps = mover.detect_overlaps(transformed)
-            is_stacked = bool(overlaps)
-
-            print("\nHow would you like to stack the remaining boxes?")
-            # Only allow sequential stacking options if blocks are not stacked
-            if not is_stacked:
-                print("  1) min→max IDs:", box_ids)
-                print("  2) max→min IDs:", list(reversed(box_ids)))
+    while True:
+            print("\n[ARRANGE] No stacks detected, entering Arrange phase.")
+            print("How would you like to stack the remaining boxes?")
+            print("  1) min→max IDs:", box_ids)
+            print("  2) max→min IDs:", list(reversed(box_ids)))
             print("  3) custom sequence")
-
             choice = input("Enter 1/2/3: ").strip()
 
             if choice == "1":
@@ -382,26 +392,24 @@ def main():
             elif choice == "2":
                 seq = list(reversed(box_ids))
             else:
-                # custom: show both lists and read a space‐separated list
                 print("Available boxes:", box_ids)
                 print("Available empty spots:", empty_ids)
                 tokens = input("Type your sequence (e.g. '3 7 8'): ").split()
                 seq = [int(t) for t in tokens]
 
-            # Always prompt user to select destination marker from available empty spots
+            # prompt for destination
             print("Available empty spots for placement:", empty_ids)
             while True:
                 try:
-                    dest = int(input("Select the destination marker ID from above: ").strip())
+                    dest = int(input("Select the destination marker ID: ").strip())
                     if dest in empty_ids:
                         break
-                    else:
-                        print("Please select a valid empty marker ID from the list.")
+                    print("Invalid marker ID.")
                 except ValueError:
-                    print("Invalid input. Please enter a number.")
+                    print("Please enter a number.")
 
+            # execute stacking
             print(f"\n[ARRANGE] Stacking {seq} onto marker {dest}")
-            # Now walk through your sequence:
             for bid in seq:
                 # find its current 3D point
                 pt = next(m["point"] for m in transformed if m["id"] == bid)
@@ -420,13 +428,9 @@ def main():
                 time.sleep(1)
                 dest = bid    # next time we stack onto *this* box’s original spot
 
-            # ----- Cleanup -----
-            mover.move_home()
-            time.sleep(1)
-            again = input("Do you want to perform another operation? (y/n): ").strip().lower()
-            if again != "y":
+            again = input("Do you want to perform another arrange? (y/n): ").strip().lower()
+            if again != 'y':
                 break
-            continue
     mover.stop_all()
     print("Program completed. Robot and camera released.")
 
