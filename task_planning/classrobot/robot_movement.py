@@ -89,8 +89,7 @@ class RobotControl:
             raise ValueError("Inverse kinematics failed to find a solution for the given pose.")
         
         return joint_robot
-
-        
+     
     # --------------------------
     # Movement Methods
     # --------------------------
@@ -214,26 +213,39 @@ class RobotControl:
             start_time = time.time()
             joint_traj = []
 
+            Kp = 0.5  # Proportional gain for position error
+
             for i in range(num_steps):
                 current_time = time.time() - start_time
                 timestamps.append(current_time)
-                # desired TCP velocity twist = [vx,vy,vz, 0,0,0]
-                x_dot_des = speed_traj[i, :]  # Desired linear speed
+                # 1) feed‑forward Cartesian speed
+                v_ff = speed_traj[i, :] 
                 ang_vel = np.zeros(3)  # Initialize angular velocity
-                x_dot_des = np.concatenate((x_dot_des, ang_vel))  # Shape: (6,)
-                x_dot_des = np.array(x_dot_des, dtype=float)  # Ensure it's a numpy array
-                # q_current  = joint_traj[i]  # Current joint configuration
+                v_ff = np.concatenate((v_ff, ang_vel))  # Shape: (6,)
+                v_ff = np.array(v_ff, dtype=float)  # Ensure 
+                # # 2) Cartesian position error
+                tcp_pose = self.robot_get_position()
+                tcp_pose = [tcp_pose[0],tcp_pose[1],tcp_pose[2]] 
+                Pe    = tcp_pose
+                p_des = traj_T[i].t                         # desired [x,y,z]
+                e_vec = p_des - Pe 
+                v_fb   = Kp * e_vec
+                kp_max = speed / np.where(e_vec==0, np.inf, e_vec)
+                print(f"[{i:03d}] t={current_time:.3f}s  error={e_vec}  kp_max={kp_max}")
+                v_total = np.hstack((v_ff[:3] + v_fb, np.zeros(3)))  # shape (6,)
+
+
+                # 5) map to joint velocities
                 q_current = self.robot_get_joint_rad()  # Current joint configuration
                 joint_traj.append(q_current)
                 # compute analytic Jacobian
-                J = robotDH.jacob0(q_current)  # J should be a 6x6 matrix.
-                dq = np.linalg.inv(J) @ x_dot_des
-                # check sigularity of Jacobian matrix
+                J = robotDH.jacob0(q_current)
+                dq = np.linalg.inv(J) @ v_total
+
                 if np.linalg.cond(J) < 1e-09:
                     print("Jacobian is singular, cannot compute joint velocities.")
-                    break
-                # record for visualization
                 joint_vels.append(dq)
+
 
 
                 # send the speedJ command
@@ -247,17 +259,11 @@ class RobotControl:
             if visualize:
                 return SE3_waypoints, np.array(joint_traj), np.array(joint_vels), timestamps
 
-
-
             # otherwise, we’re done
             time.sleep(0.5)  # wait for last command to finish
             self.robot_move_speed_stop()
             print(">> my_robot_moveL: trajectory executed successfully")
             return True
-
-
-
-
 
 
     def robot_moveL_stop(self, a=10.0, asynchronous=False) -> None:
@@ -275,96 +281,97 @@ class RobotControl:
         else:
             self._ROBOT_CON_.speedJ(velocity, acceleration)
 
-    def robo_move_home(self):
+    def robot_move_home(self):
         HOME_POS = [0.701172053107018, 0.184272460738082, 0.1721568294843568,
                     -1.7318488600590023, 0.686830145115122, -1.731258978679887]
         SPEED = 0.05
+        ACC = 0.25
         print("Moving to home position...")
-        self.robot_moveL(HOME_POS, SPEED)
+        self.robot_moveL(HOME_POS, SPEED, ACC)
         print("Arrived at home position.")
         time.sleep(1)
 
 
-    def my_convert_position_from_left_to_avatar(self,position: list[float]) -> list[float]:
-        '''
-        Convert TCP Position from Robot (Left) Ref to Avatar Ref
-        '''
+    # def my_convert_position_from_left_to_avatar(self,position: list[float]) -> list[float]:
+    #     '''
+    #     Convert TCP Position from Robot (Left) Ref to Avatar Ref
+    #     '''
         
-        # swap axis z    y   x
-        res = [-position[2], -position[1], -position[0]]
+    #     # swap axis z    y   x
+    #     res = [-position[2], -position[1], -position[0]]
 
-        # translation
-        res[0] -= 0.055
-        res[1] += 0.400
+    #     # translation
+    #     res[0] -= 0.055
+    #     res[1] += 0.400
 
-        return res
+    #     return res
     
-    def my_convert_position_from_avatar_to_left(self, position: list[float]) -> list[float]:
-        '''
-        Convert TCP Position from Avatar Reference back to Robot (Left) Reference.
-        This is the inverse of my_convert_position_from_left_to_avatar.
+    # def my_convert_position_from_avatar_to_left(self, position: list[float]) -> list[float]:
+    #     '''
+    #     Convert TCP Position from Avatar Reference back to Robot (Left) Reference.
+    #     This is the inverse of my_convert_position_from_left_to_avatar.
         
-        Given (from the original conversion):
-        Avatar[0] = -Robot[2] - 0.055
-        Avatar[1] = -Robot[1] + 0.400
-        Avatar[2] = -Robot[0]
+    #     Given (from the original conversion):
+    #     Avatar[0] = -Robot[2] - 0.055
+    #     Avatar[1] = -Robot[1] + 0.400
+    #     Avatar[2] = -Robot[0]
         
-        Then the inverse conversion is:
-        Robot[0] = -Avatar[2]
-        Robot[1] = 0.400 - Avatar[1]
-        Robot[2] = -(Avatar[0] + 0.055)
-        '''
-        res = [-position[2], 0.400 - position[1], -(position[0] + 0.055)]
-        return res
+    #     Then the inverse conversion is:
+    #     Robot[0] = -Avatar[2]
+    #     Robot[1] = 0.400 - Avatar[1]
+    #     Robot[2] = -(Avatar[0] + 0.055)
+    #     '''
+    #     res = [-position[2], 0.400 - position[1], -(position[0] + 0.055)]
+    #     return res
     
-    def convert_gripper_to_maker(self, position: list[float]) -> list[float]:
-        '''
-        Convert TCP Position from Gripper Ref to Marker Ref
-        '''
+    # def convert_gripper_to_maker(self, position: list[float]) -> list[float]:
+    #     '''
+    #     Convert TCP Position from Gripper Ref to Marker Ref
+    #     '''
     
-        res = [position[0], position[1], position[2]]
+    #     res = [position[0], position[1], position[2]]
 
-        # translation
-        res[0] += 0.18
-        res[1] += 0.18
+    #     # translation
+    #     res[0] += 0.18
+    #     res[1] += 0.18
 
-        return res
+    #     return res
        
-    def my_transform_position_to_world_ref(self, position: list[float]) -> list[float]:
-        """
-        Convert position from local robot reference to world (avatar) reference.
-        Applies:
-        - Rotation about Z by -pi/2
-        - Rotation about Y by pi
-        - Translation by (0.75, 0, 1.51)
+    # def my_transform_position_to_world_ref(self, position: list[float]) -> list[float]:
+    #     """
+    #     Convert position from local robot reference to world (avatar) reference.
+    #     Applies:
+    #     - Rotation about Z by -pi/2
+    #     - Rotation about Y by pi
+    #     - Translation by (0.75, 0, 1.51)
         
-        The conversion is done as:
-            p_world = R * p_robot + t
-        where R = Ry @ Rz and t = [0.75, 0.0, 1.51].
-        """
-        from math import cos, sin, pi
-        import numpy as np
+    #     The conversion is done as:
+    #         p_world = R * p_robot + t
+    #     where R = Ry @ Rz and t = [0.75, 0.0, 1.51].
+    #     """
+    #     from math import cos, sin, pi
+    #     import numpy as np
         
-        # Rotation about Z by -pi/2:
-        Rz = np.array([
-            [cos(-pi/2), -sin(-pi/2), 0],
-            [sin(-pi/2),  cos(-pi/2), 0],
-            [0,           0,          1]
-        ])
-        # Rotation about Y by pi:
-        Ry = np.array([
-            [ cos(pi), 0, sin(pi)],
-            [ 0,       1, 0      ],
-            [-sin(pi), 0, cos(pi)]
-        ])
-        # Combined rotation:
-        R = Ry @ Rz
-        # Translation vector:
-        t = np.array([0.75, 0.0, 1.51])
+    #     # Rotation about Z by -pi/2:
+    #     Rz = np.array([
+    #         [cos(-pi/2), -sin(-pi/2), 0],
+    #         [sin(-pi/2),  cos(-pi/2), 0],
+    #         [0,           0,          1]
+    #     ])
+    #     # Rotation about Y by pi:
+    #     Ry = np.array([
+    #         [ cos(pi), 0, sin(pi)],
+    #         [ 0,       1, 0      ],
+    #         [-sin(pi), 0, cos(pi)]
+    #     ])
+    #     # Combined rotation:
+    #     R = Ry @ Rz
+    #     # Translation vector:
+    #     t = np.array([0.75, 0.0, 1.51])
         
-        # Compute final world position:
-        pos_final = R @ np.array(position) + t
-        return pos_final.tolist()
+    #     # Compute final world position:
+    #     pos_final = R @ np.array(position) + t
+    #     return pos_final.tolist()
 
     
 

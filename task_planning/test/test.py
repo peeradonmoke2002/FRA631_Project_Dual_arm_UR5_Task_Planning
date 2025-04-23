@@ -214,14 +214,15 @@ class Move2Object:
         """
         p = marker_point
         # approach pose (X–Z move, Y fixed)
-        approach = [p.x, self.FIX_Y, p.z] + RPY
+        approach = [p.x, p.y - 0.20, p.z] + RPY
         # actual place pose
-        place_pos = [p.x, p.y-0.06,p.z] + GRAP_RPY
+        place_pos = [p.x, p.y-0.07,p.z] + GRAP_RPY
         print(f"[PLACE] at marker pos (x={p.x}, y={p.y}, z={p.z})")
         # move above in X–Z
         print("move linear")
 
         self.robot.my_robot_moveL(self.robotDH, approach, self.dt, self.speed, self.acceleration, False)
+        time.sleep(5)
         self.robot.my_robot_moveL(self.robotDH, place_pos, self.dt, self.speed, self.acceleration, False)
         # grip
         
